@@ -99,9 +99,26 @@ def _custom_openapi() -> dict[str, Any]:
     # relative URL, which Dify can override in its custom-tool UI anyway.
     public_url = os.environ.get("MEMPALACE_PUBLIC_URL", "/")
     schema["servers"] = [{"url": public_url}]
+    _strip_validation_error_schemas(schema)
     _downgrade_openapi_31_to_30(schema)
     app.openapi_schema = schema
     return schema
+
+
+def _strip_validation_error_schemas(schema: dict[str, Any]) -> None:
+    # FastAPI auto-emits a 422 response on every body endpoint, with a
+    # `ValidationError` schema whose `loc` is `list[str | int]`. Dify does not
+    # use 422 schemas and its importer dislikes the resulting union. Strip the
+    # 422 responses and the now-orphaned validation schemas.
+    for path_item in schema.get("paths", {}).values():
+        if not isinstance(path_item, dict):
+            continue
+        for op in path_item.values():
+            if isinstance(op, dict):
+                op.get("responses", {}).pop("422", None)
+    schemas = schema.get("components", {}).get("schemas", {})
+    schemas.pop("ValidationError", None)
+    schemas.pop("HTTPValidationError", None)
 
 
 app.openapi = _custom_openapi  # type: ignore[method-assign]
