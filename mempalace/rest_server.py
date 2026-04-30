@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 
 from . import mcp_server as mcp
@@ -22,6 +23,55 @@ app = FastAPI(
     version=__version__,
     description="HTTP surface over MemPalace. One endpoint per MemPalace tool.",
 )
+
+
+# Dify (and other OpenAPI 3.0-only consumers) cannot parse the 3.1.0 schema
+# FastAPI emits by default — type arrays like `["string", "null"]`, `examples`
+# lists, and numeric `exclusiveMinimum`/`exclusiveMaximum` all trip its
+# importer. Override `app.openapi` to emit a 3.0.3-compatible schema.
+def _downgrade_openapi_31_to_30(node: Any) -> None:
+    if isinstance(node, dict):
+        t = node.get("type")
+        if isinstance(t, list):
+            non_null = [x for x in t if x != "null"]
+            if len(non_null) == 1:
+                node["type"] = non_null[0]
+                if "null" in t:
+                    node["nullable"] = True
+        examples = node.get("examples")
+        if isinstance(examples, list) and examples and "example" not in node:
+            node["example"] = examples[0]
+            del node["examples"]
+        for key, partner in (("exclusiveMinimum", "minimum"), ("exclusiveMaximum", "maximum")):
+            v = node.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                node[partner] = v
+                node[key] = True
+        if node.get("const") is not None and "enum" not in node:
+            node["enum"] = [node.pop("const")]
+        for v in node.values():
+            _downgrade_openapi_31_to_30(v)
+    elif isinstance(node, list):
+        for v in node:
+            _downgrade_openapi_31_to_30(v)
+
+
+def _custom_openapi() -> dict[str, Any]:
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    schema["openapi"] = "3.0.3"
+    _downgrade_openapi_31_to_30(schema)
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi  # type: ignore[method-assign]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
