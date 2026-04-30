@@ -9,6 +9,7 @@ Run:  uvicorn mempalace.rest_server:app --host 0.0.0.0 --port 8000
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import FastAPI
@@ -29,8 +30,35 @@ app = FastAPI(
 # FastAPI emits by default — type arrays like `["string", "null"]`, `examples`
 # lists, and numeric `exclusiveMinimum`/`exclusiveMaximum` all trip its
 # importer. Override `app.openapi` to emit a 3.0.3-compatible schema.
+def _is_null_schema(s: Any) -> bool:
+    return isinstance(s, dict) and s.get("type") == "null" and len(s) == 1
+
+
+def _collapse_anyof_null(node: dict[str, Any]) -> None:
+    # Pydantic v2 emits `Optional[T]` as anyOf: [<T>, {type: "null"}]. 3.0 has no
+    # `null` type, so drop the null branch and set `nullable: true` on the rest.
+    for key in ("anyOf", "oneOf"):
+        variants = node.get(key)
+        if not isinstance(variants, list):
+            continue
+        non_null = [v for v in variants if not _is_null_schema(v)]
+        had_null = len(non_null) != len(variants)
+        if not had_null:
+            continue
+        if len(non_null) == 1:
+            survivor = non_null[0]
+            del node[key]
+            for k, v in survivor.items():
+                node.setdefault(k, v)
+            node["nullable"] = True
+        else:
+            node[key] = non_null
+            node["nullable"] = True
+
+
 def _downgrade_openapi_31_to_30(node: Any) -> None:
     if isinstance(node, dict):
+        _collapse_anyof_null(node)
         t = node.get("type")
         if isinstance(t, list):
             non_null = [x for x in t if x != "null"]
@@ -66,6 +94,11 @@ def _custom_openapi() -> dict[str, Any]:
         routes=app.routes,
     )
     schema["openapi"] = "3.0.3"
+    # Dify warns on a missing `servers` block. Allow override via env var so
+    # operators can set the LAN URL the API is reachable on; fall back to a
+    # relative URL, which Dify can override in its custom-tool UI anyway.
+    public_url = os.environ.get("MEMPALACE_PUBLIC_URL", "/")
+    schema["servers"] = [{"url": public_url}]
     _downgrade_openapi_31_to_30(schema)
     app.openapi_schema = schema
     return schema
